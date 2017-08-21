@@ -3,11 +3,7 @@
 #
 
 main() {
-    # We need to keep the VMs between runs for now because the containers are
-    # built directly on the VMs and building them all each time takes a long time
-    # TODO: Uncomment the line below once we have a better solution for building
-    # the containers and we can afford to destroy the VMs every time
-    #trap 'cleanup' SIGTERM SIGINT SIGQUIT EXIT
+    trap 'cleanup' SIGTERM SIGINT SIGQUIT EXIT
     setup
     run_tests
 }
@@ -90,11 +86,47 @@ setup_go_dirs() {
 }
 
 run_tests() {
-    /bin/bash automation/test.sh
+    # Install dockerize
+    export DOCKERIZE_VERSION=v0.3.0
+    curl -LO https://github.com/jwilder/dockerize/releases/download/$DOCKERIZE_VERSION/dockerize-linux-amd64-$DOCKERIZE_VERSION.tar.gz \
+        && tar -C $WORKSPACE -xzvf dockerize-linux-amd64-$DOCKERIZE_VERSION.tar.gz \
+        && rm dockerize-linux-amd64-$DOCKERIZE_VERSION.tar.gz
+
+    vagrant up --provider=libvirt
+
+    # Copy connection details for kubernetes
+    cluster/kubectl.sh --init
+
+    # Make sure we can connect to kubernetes
+    export APISERVER=$(cat cluster/vagrant/.kubeconfig | grep server | sed -e 's# \+server: https://##' | sed -e 's/\r//')
+    $WORKSPACE/dockerize -wait tcp://$APISERVER -timeout 120s
+    # Make sure we don't try to talk to Vagrant host via a proxy
+    export no_proxy="${APISERVER%:*}"
+
+    # Wait for nodes to become ready
+    while [ -n "$(cluster/kubectl.sh --core get nodes --no-headers | grep -v Ready)" ]; do
+       echo "Waiting for all nodes to become ready ..."
+       cluster/kubectl.sh --core get nodes --no-headers | >&2 grep -v Ready
+       sleep 10
+    done
+    echo "Nodes are ready:"
+    cluster/kubectl.sh --core get nodes
+
+    sleep 10
+    while [ -n "$(cluster/kubectl.sh --core get pods -n kube-system --no-headers | grep -v Running)" ]; do
+        echo "Waiting for kubernetes pods to become ready ..."
+        cluster/kubectl.sh --core get pods -n kube-system --no-headers | >&2 grep -v Running
+        sleep 10
+    done
+
+    echo "Kubernetes is ready:"
+    cluster/kubectl.sh --core get pods -n kube-system
+    echo ""
+    echo ""
 }
 
 cleanup() {
-    vagrant destroy
+    vagrant halt
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
